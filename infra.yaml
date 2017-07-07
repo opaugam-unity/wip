@@ -1,0 +1,121 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: infra
+
+---
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: infra
+  namespace: infra
+
+---
+
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRoleBinding
+metadata:
+  name: infra
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: admin
+subjects:
+- kind: ServiceAccount
+  name: infra
+  namespace: infra
+
+---
+
+kind: "StorageClass"
+apiVersion: "storage.k8s.io/v1"
+metadata:
+  name: ebs
+  namespace: infra
+  annotations:
+    storageclass.beta.kubernetes.io/is-default-class: "true"
+provisioner: "kubernetes.io/aws-ebs"
+parameters:
+  type: "gp2"
+  encrypted: "false"
+  zone: us-east-1a
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: etcd
+  namespace: infra
+spec:
+  clusterIP: None
+  ports:
+  - protocol: TCP
+    port: 2379
+    name: client
+  - protocol: TCP
+    port: 2380
+    name: peer
+  selector:
+    app: etcd
+
+---
+
+apiVersion: apps/v1beta1
+kind: StatefulSet
+metadata:
+  name: etcd
+  namespace: infra
+spec:
+  serviceName: etcd
+  replicas: 3
+  template:
+    metadata:
+      labels:
+        app: etcd
+    spec:
+      serviceAccountName: infra
+      containers:
+       - image: quay.io/coreos/etcd:latest
+         name: etcd
+         imagePullPolicy: Always
+         command:
+          - /bin/sh
+          - -ec
+          - |
+            CLUSTER="--initial-cluster etcd-0=http://etcd-0.etcd:2380,etcd-1=http://etcd-1.etcd:2380,etcd-2=http://etcd-2.etcd:2380"
+            if [ ! -e /data/default.etcd ]; then
+              CLUSTER="$CLUSTER --initial-cluster-state new"
+            fi
+            /usr/local/bin/etcd --name $(NAME)                      \
+            --initial-advertise-peer-urls http://$(NAME).etcd:2380  \
+            --listen-peer-urls http://0.0.0.0:2380                  \
+            --listen-client-urls http://0.0.0.0:2379                \
+            --advertise-client-urls http://$(NAME):2379             \
+            --data-dir /data/default.etcd $CLUSTER
+         volumeMounts:
+         - name: data
+           mountPath: "/data"
+         ports:
+         - containerPort: 2379
+           protocol: TCP
+         - containerPort: 2380
+           protocol: TCP
+         env:
+          - name: NAME
+            valueFrom:
+              fieldRef:
+                apiVersion: v1
+                fieldPath: metadata.name
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        annotations:
+          volume.beta.kubernetes.io/storage-class: ebs
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
